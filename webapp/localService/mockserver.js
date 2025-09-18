@@ -445,7 +445,6 @@ sap.ui.define([
 
 			return oHelper;
 		}
-
 		return null;
 	}
 

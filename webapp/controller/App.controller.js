@@ -1,4 +1,5 @@
 sap.ui.define([
+	"sap/ui/core/Messaging",
 	"sap/ui/core/mvc/Controller",
 	"sap/m/MessageToast",
 	"sap/m/MessageBox",
@@ -7,8 +8,8 @@ sap.ui.define([
 	"sap/ui/model/FilterOperator",
 	"sap/ui/model/FilterType",
 	"sap/ui/model/json/JSONModel"
-], function (Controller, MessageToast, MessageBox, Sorter, Filter, FilterOperator, FilterType,
-	JSONModel) {
+], function (Messaging, Controller, MessageToast, MessageBox, Sorter, Filter, FilterOperator,
+	FilterType, JSONModel) {
 	"use strict";
 
 	return Controller.extend("sap.ui.core.tutorial.odatav4.controller.App", {
@@ -17,18 +18,65 @@ sap.ui.define([
 		 *  Hook for initializing the controller
 		 */
 		onInit : function () {
-			var oJSONData = {
+			var oMessageModel = Messaging.getMessageModel(),
+				oMessageModelBinding = oMessageModel.bindList("/", undefined, [],
+					new Filter("technical", FilterOperator.EQ, true)),
+				oViewModel = new JSONModel({
 					busy : false,
+					hasUIChanges : false,
+					usernameEmpty : true,
 					order : 0
-				},
-				oModel = new JSONModel(oJSONData);
+				});
 
-			this.getView().setModel(oModel, "appView");
+			this.getView().setModel(oViewModel, "appView");
+			this.getView().setModel(oMessageModel, "message");
+
+			oMessageModelBinding.attachChange(this.onMessageBindingChange, this);
+			this._bTechnicalErrors = false;
 		},
 
 		/* =========================================================== */
 		/*           begin: event handlers                             */
 		/* =========================================================== */
+
+		/**
+		 * Create a new entry.
+		 */
+		onCreate : function () {
+			var oList = this.byId("peopleList"),
+				oBinding = oList.getBinding("items"),
+				// Create a new entry through the table's list binding
+				oContext = oBinding.create({Age : "18"});
+
+			this._setUIChanges(true);
+			this.getView().getModel("appView").setProperty("/usernameEmpty", true);
+
+			// Select and focus the table row that contains the newly created entry
+			oList.getItems().some(function (oItem) {
+				if (oItem.getBindingContext() === oContext) {
+					oItem.focus();
+					oItem.setSelected(true);
+					return true;
+				}
+			});
+		},
+
+		/**
+		 * Lock UI when changing data in the input controls
+		 * @param {sap.ui.base.Event} oEvt - Event data
+		 */
+		onInputChange : function (oEvt) {
+			if (oEvt.getParameter("escPressed")) {
+				this._setUIChanges();
+			} else {
+				this._setUIChanges(true);
+				// Check if the username in the changed table row is empty and set the appView
+				// property accordingly
+				if (oEvt.getSource().getParent().getBindingContext().getProperty("UserName")) {
+					this.getView().getModel("appView").setProperty("/usernameEmpty", false);
+				}
+			}
+		},
 
 		/**
 		 * Refresh the data.
@@ -42,6 +90,38 @@ sap.ui.define([
 			}
 			oBinding.refresh();
 			MessageToast.show(this._getText("refreshSuccessMessage"));
+		},
+
+		/**
+		 * Reset any unsaved changes.
+		 */
+		onResetChanges : function () {
+			this.byId("peopleList").getBinding("items").resetChanges();
+			// If there were technical errors, cancelling changes resets them.
+			this._bTechnicalErrors = false;
+			this._setUIChanges(false);
+		},
+
+		/**
+		 * Save changes to the source.
+		 */
+		onSave : function () {
+			var fnSuccess = function () {
+					this._setBusy(false);
+					MessageToast.show(this._getText("changesSentMessage"));
+					this._setUIChanges(false);
+				}.bind(this),
+
+				fnError = function (oError) {
+					this._setBusy(false);
+					this._setUIChanges(false);
+					MessageBox.error(oError.message);
+				}.bind(this);
+
+			this._setBusy(true); // Lock UI until submitBatch is resolved.
+			this.getView().getModel().submitBatch("peopleGroup").then(fnSuccess, fnError);
+			// If there were technical errors, a new save resets them.
+			this._bTechnicalErrors = false;
 		},
 
 		/**
@@ -79,6 +159,33 @@ sap.ui.define([
 			MessageToast.show(sMessage);
 		},
 
+		onMessageBindingChange : function (oEvent) {
+			var aContexts = oEvent.getSource().getContexts(),
+				aMessages,
+				bMessageOpen = false;
+
+			if (bMessageOpen || !aContexts.length) {
+				return;
+			}
+
+			// Extract and remove the technical messages
+			aMessages = aContexts.map(function (oContext) {
+				return oContext.getObject();
+			});
+			Messaging.removeMessages(aMessages);
+
+			this._setUIChanges(true);
+			this._bTechnicalErrors = true;
+			MessageBox.error(aMessages[0].message, {
+				id : "serviceErrorMessageBox",
+				onClose : function () {
+					bMessageOpen = false;
+				}
+			});
+
+			bMessageOpen = true;
+		},
+
 		/* =========================================================== */
 		/*           end: event handlers                               */
 		/* =========================================================== */
@@ -92,6 +199,34 @@ sap.ui.define([
 		_getText : function (sTextId, aArgs) {
 			return this.getOwnerComponent().getModel("i18n").getResourceBundle()
 				.getText(sTextId, aArgs);
+		},
+
+		/**
+		 * Set hasUIChanges flag in View Model
+		 * @param {boolean} [bHasUIChanges] - set or clear hasUIChanges
+		 * if bHasUIChanges is not set, the hasPendingChanges-function of the OdataV4 model
+		 * determines the result
+		 */
+		_setUIChanges : function (bHasUIChanges) {
+			if (this._bTechnicalErrors) {
+				// If there is currently a technical error, then force 'true'.
+				bHasUIChanges = true;
+			} else if (bHasUIChanges === undefined) {
+				bHasUIChanges = this.getView().getModel().hasPendingChanges();
+			}
+			var oModel = this.getView().getModel("appView");
+
+			oModel.setProperty("/hasUIChanges", bHasUIChanges);
+		},
+
+		/**
+		 * Set busy flag in View Model
+		 * @param {boolean} bIsBusy - set or clear busy
+		 */
+		_setBusy : function (bIsBusy) {
+			var oModel = this.getView().getModel("appView");
+
+			oModel.setProperty("/busy", bIsBusy);
 		}
 	});
 });
